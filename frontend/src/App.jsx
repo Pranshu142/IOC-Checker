@@ -40,14 +40,13 @@ export default function App() {
   async function runJob(title, base, items) {
     const rpm = (plan || planFrom(null)).rpm, id = uid();
     const prepared = items.map((it) => {
-      if (it.existing) return { ind: it.ind, row: { value: it.ind, sev: it.existing, mal: '', total: '', link: '' } };
       const c = cacheGet(it.ind);
       return { ind: it.ind, row: c ? { ...c, cached: true } : null };
     });
     const need = [...new Set(prepared.filter((p) => !p.row).map((p) => p.ind))];
     const job = { title, base, items: prepared, need: need.length, done: 0, rpm, running: need.length > 0, stopped: false, error: null };
     setMsgs((m) => [...m, { id, role: 'assistant', job }]);
-    if (!need.length) return say('Nothing new to look up: every row was already checked or had a severity.');
+    if (!need.length) return say('Nothing new to look up: every row was already checked in the last 24 hours.');
 
     const patch = (fn) => setMsgs((m) => m.map((x) => (x.id === id ? { ...x, job: fn(x.job) } : x)));
     const ac = new AbortController(); ctl.current = ac;
@@ -80,7 +79,7 @@ export default function App() {
     const list = splitIndicators(text).slice(0, 100);
     if (!list.length) return;
     add({ role: 'user', text });
-    runJob(list.length === 1 ? list[0] : `${list.length} indicators`, 'vt-chat', list.map((ind) => ({ ind, existing: '' })));
+    runJob(list.length === 1 ? list[0] : `${list.length} indicators`, 'vt-chat', list.map((ind) => ({ ind })));
   }
 
   async function onFile(file) {
