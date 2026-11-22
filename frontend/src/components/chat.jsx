@@ -94,7 +94,7 @@ function ResultsTable({ items }) {
           <TableRow>
             <TableHead>Indicator</TableHead>
             <TableHead className="w-36">Severity</TableHead>
-            <TableHead className="w-24 text-right">VT score</TableHead>
+            <TableHead className="w-28 whitespace-nowrap text-right">VT score</TableHead>
             <TableHead className="w-10" />
           </TableRow>
         </TableHeader>
@@ -109,7 +109,10 @@ function ResultsTable({ items }) {
                   {r?.note && <div className="truncate text-xs text-muted-foreground">{r.note}</div>}
                 </TableCell>
                 <TableCell><SevBadge sev={r?.sev} /></TableCell>
-                <TableCell className="text-right font-mono text-xs">{r ? scoreText(r) : ''}</TableCell>
+                <TableCell className="whitespace-nowrap text-right font-mono text-xs">
+                  {r ? scoreText(r) : ''}
+                  {r?.cached && <div className="font-sans text-[10px] text-muted-foreground">cached</div>}
+                </TableCell>
                 <TableCell>
                   {link && <a href={link} target="_blank" rel="noopener noreferrer" aria-label="Open on VirusTotal" className="text-muted-foreground hover:text-foreground"><ExternalLink className="size-4" /></a>}
                 </TableCell>
@@ -126,14 +129,16 @@ function JobCard({ job, onStop, onDownload }) {
   const pct = job.need ? Math.round((job.done / job.need) * 100) : 100;
   const left = Math.max(1, Math.ceil((job.need - job.done) / job.rpm));
   const finished = job.items.filter((x) => x.row).length;
+  const fromCache = job.items.filter((x) => x.row?.cached).length;
   return (
     <div className="space-y-3">
       {job.need > 0 && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>
-              {job.running ? `Checking ${job.done} of ${job.need} · about ${left} min left at ${job.rpm}/min`
-                : job.stopped ? `Stopped at ${job.done} of ${job.need}` : `Checked ${job.done} of ${job.need}`}
+              {job.running ? `Looking up ${job.done} of ${job.need} new indicators · about ${left} min left at ${job.rpm}/min`
+                : job.stopped ? `Stopped at ${job.done} of ${job.need} new lookups` : `Done: ${job.items.length} rows, ${job.done} looked up now`}
+              {fromCache > 0 && ` · ${fromCache} from the 24h cache`}
             </span>
             <span>{pct}%</span>
           </div>
@@ -171,4 +176,3 @@ export function Message({ m, onStop, onDownload, onTemplate }) {
     </div>
   );
 }
-
