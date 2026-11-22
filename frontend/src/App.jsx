@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header, Composer, Message } from '@/components/chat';
-import { fetchQuota, streamBatch } from '@/lib/api';
+import { fetchQuota, checkAll } from '@/lib/api';
 import { readSheet, downloadExcel, downloadTemplate } from '@/lib/excel';
 import { cacheGet, cacheSave, cacheSet, isKey, loadKey, planFrom, saveKey, splitIndicators, toRow } from '@/lib/ioc';
 
@@ -54,22 +54,28 @@ export default function App() {
     if (plan?.dailyLeft != null && need.length > plan.dailyLeft)
       say(`Heads up: this needs ${need.length} lookups and your key has about ${plan.dailyLeft} left today. The rest will fail, and you can still download what finishes.`);
 
-    let badKey = false;
+    let badKey = false, lastErr = null, saved = 0;
+    const finished = new Set();
     try {
-      for (let o = 0; o < need.length && !ac.signal.aborted; o += 500) {
-        const chunk = need.slice(o, o + 500);
-        await streamBatch({ indicators: chunk, key, rpm, signal: ac.signal, onResult: (d) => {
-          const ind = chunk[d.idx], row = toRow(d);
-          cacheSet(ind, row);
-          patch((j) => ({ ...j, done: j.done + 1, items: j.items.map((it) => (it.ind === ind ? { ...it, row } : it)) }));
-          if (d.status === 'badkey') { badKey = true; ac.abort(); }
-        } });
-      }
-      patch((j) => ({ ...j, running: false }));
+      lastErr = (await checkAll({ indicators: need, key, rpm, signal: ac.signal, onResult: (ind, d) => {
+        finished.add(ind);
+        const row = toRow(d);
+        cacheSet(ind, row);
+        if (++saved % 10 === 0) cacheSave();           // a reload or crash then loses at most 10 results
+        patch((j) => ({ ...j, done: j.done + 1, items: j.items.map((it) => (it.ind === ind ? { ...it, row } : it)) }));
+        if (d.status === 'badkey') { badKey = true; ac.abort(); }
+      } })).lastError;
     } catch (e) {
-      if (e.name === 'AbortError') patch((j) => ({ ...j, running: false, stopped: true }));
-      else { badKey = badKey || e.badKey; patch((j) => ({ ...j, running: false, error: e.message })); }
+      if (e.name !== 'AbortError') { badKey = badKey || !!e.badKey; lastErr = e; }
     }
+    // Nothing may stay on "Checking": whatever got no answer is resolved here.
+    const left = new Set(need.filter((i) => !finished.has(i)));
+    const stopped = ac.signal.aborted;
+    const leftover = (ind) => ({ value: ind, type: '', mal: '', total: '', link: '', cached: false,
+      sev: stopped ? 'Not checked' : 'Error', note: stopped ? undefined : 'No answer from the server. Run it again.' });
+    patch((j) => ({ ...j, running: false, stopped: stopped && !badKey,
+      error: lastErr ? lastErr.message : left.size && !stopped ? 'Some lookups got no answer from the server and are marked Error.' : null,
+      items: j.items.map((it) => (!it.row && left.has(it.ind) ? { ...it, row: leftover(it.ind) } : it)) }));
     cacheSave(); setBusy(false); ctl.current = null;
     if (badKey) forget('VirusTotal rejected your key. Paste a valid one to continue.');
     else loadPlan(key);

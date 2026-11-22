@@ -7,6 +7,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import java.util.regex.*;
 
 /**
@@ -28,6 +29,9 @@ public class Main {
     static final ConcurrentHashMap<String, Limiter> LIMITERS = new ConcurrentHashMap<>();
     static final long TTL_MS = 6 * 3600_000L;
     static final int MAX_BATCH = 500, MAX_CACHE = 5000;
+    static final String VT_BASE = Optional.ofNullable(System.getenv("VT_BASE_URL")).orElse("https://www.virustotal.com");
+    static final long WINDOW_MS = Long.parseLong(Optional.ofNullable(System.getenv("VT_WINDOW_MS")).orElse("61000"));
+    static final long HEARTBEAT_MS = Long.parseLong(Optional.ofNullable(System.getenv("HEARTBEAT_MS")).orElse("15000"));
     static final String ORIGIN = Optional.ofNullable(System.getenv("ALLOWED_ORIGIN")).orElse("*");
 
     record Result(String value, String type, String status, int malicious, int suspicious, int total,
@@ -46,16 +50,30 @@ public class Main {
     }
     record Cached(Result r, long exp) {}
 
-    /** Hands out one VirusTotal slot every 60000/rpm ms; safe to call from many threads. */
+    /**
+     * Sliding-window limiter: never more than `rpm` requests in any 61s window (1s safety margin).
+     * Nothing is reserved in advance, so a retried request takes the next free slot instead of
+     * joining the back of a queue. A rate-limit reply pauses the whole key for a minute.
+     */
     static final class Limiter {
-        private long next = 0; private final long gap;
-        Limiter(int rpm) { gap = 60000L / rpm; }
-        void acquire() throws InterruptedException {
-            long wait;
-            synchronized (this) { long now = System.currentTimeMillis(); next = Math.max(next, now); wait = next - now; next += gap; }
-            if (wait > 0) Thread.sleep(wait);
+        static final long WINDOW = WINDOW_MS;
+        private final int rpm; private final ArrayDeque<Long> sent = new ArrayDeque<>(); private long blockedUntil = 0;
+        Limiter(int rpm) { this.rpm = rpm; }
+        /** Waits for a free slot. Returns false if `cancelled` turns true while waiting (the browser left). */
+        boolean acquire(java.util.function.BooleanSupplier cancelled) throws InterruptedException {
+            for (;;) {
+                if (cancelled.getAsBoolean()) return false;
+                long wait;
+                synchronized (this) {
+                    long now = System.currentTimeMillis();
+                    while (!sent.isEmpty() && now - sent.peekFirst() >= WINDOW) sent.pollFirst();
+                    wait = Math.max(blockedUntil - now, sent.size() >= rpm ? sent.peekFirst() + WINDOW - now : 0);
+                    if (wait <= 0) { sent.addLast(now); return true; }
+                }
+                Thread.sleep(Math.min(Math.max(wait, 5), 500));
+            }
         }
-        synchronized void penalize(long ms) { next = Math.max(next, System.currentTimeMillis()) + ms; }
+        synchronized void penalize(long ms) { blockedUntil = Math.max(blockedUntil, System.currentTimeMillis() + ms); }
     }
 
     // ---------- helpers ----------
@@ -123,7 +141,9 @@ public class Main {
     }
 
     // ---------- lookup pipeline ----------
-    static Result lookup(String raw, String key, int rpm) {
+    static Result lookup(String raw, String key, int rpm) { return lookup(raw, key, rpm, () -> false); }
+
+    static Result lookup(String raw, String key, int rpm, java.util.function.BooleanSupplier cancelled) {
         String value = refang(raw), type = classify(value);
         if (type == null) return new Result(value, "", "invalid", 0, 0, 0, "", value.matches("^\\d{1,3}(\\.\\d{1,3}){1,2}$") ? "Incomplete IP address: an IPv4 needs 4 parts" : "Not a recognised IP, domain, URL or hash", false);
         if (type.equals("hash") || type.equals("domain")) value = value.toLowerCase();
@@ -138,7 +158,7 @@ public class Main {
         CompletableFuture<Result> existing = INFLIGHT.putIfAbsent(ck, mine);
         if (existing != null) return existing.join().withCached();
         try {
-            Result r = callVt(v, t, key, rpm);
+            Result r = callVt(v, t, key, rpm, cancelled);
             if (r.status.equals("ok") || r.status.equals("notfound")) {
                 if (CACHE.size() > MAX_CACHE) CACHE.clear();
                 CACHE.put(ck, new Cached(r, System.currentTimeMillis() + TTL_MS));
@@ -150,7 +170,8 @@ public class Main {
         } finally { INFLIGHT.remove(ck); }
     }
 
-    static Result callVt(String value, String type, String key, int rpm) {
+    /** One VirusTotal request. Rate limits and network hiccups return status "retry"; the caller re-queues them. */
+    static Result callVt(String value, String type, String key, int rpm, java.util.function.BooleanSupplier cancelled) {
         String path = switch (type) {
             case "ip" -> "ip_addresses/" + value;
             case "domain" -> "domains/" + value;
@@ -160,36 +181,39 @@ public class Main {
         Limiter lim = LIMITERS.computeIfAbsent(sha(key) + ":" + rpm, k -> new Limiter(rpm));
         String link = "https://www.virustotal.com/gui/search/" + URLEncoder.encode(value, StandardCharsets.UTF_8);
         try {
-            for (int attempt = 0; attempt < 2; attempt++) {
-                lim.acquire();
-                HttpRequest req = HttpRequest.newBuilder(URI.create("https://www.virustotal.com/api/v3/" + path))
-                        .header("x-apikey", key).timeout(Duration.ofSeconds(10)).GET().build();
-                HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-                switch (res.statusCode()) {
-                    case 200 -> {
-                        Matcher m = Pattern.compile("\"last_analysis_stats\"\\s*:\\s*\\{([^}]*)\\}").matcher(res.body());
-                        String blk = m.find() ? m.group(1) : "";
-                        int total = 0; Matcher n = Pattern.compile(":\\s*(\\d+)").matcher(blk);
-                        while (n.find()) total += Integer.parseInt(n.group(1));
-                        return new Result(value, type, "ok", num(blk, "malicious"), num(blk, "suspicious"), total, link, null, false);
-                    }
-                    case 404 -> { return new Result(value, type, "notfound", 0, 0, 0, link, null, false); }
-                    case 401, 403 -> { return new Result(value, type, "badkey", 0, 0, 0, "", "VirusTotal rejected that API key.", false); }
-                    case 429 -> {
-                        if (res.body().contains("QuotaExceeded"))
-                            return new Result(value, type, "error", 0, 0, 0, "", "Your VirusTotal quota is used up. Try again later.", false);
-                        lim.penalize(60_000);   // per-minute limit: back off the whole key, then retry once
-                    }
-                    default -> { return new Result(value, type, "error", 0, 0, 0, "", "VirusTotal returned HTTP " + res.statusCode(), false); }
+            if (!lim.acquire(cancelled)) return new Result(value, type, "retry", 0, 0, 0, "", "Cancelled", false);
+            HttpRequest req = HttpRequest.newBuilder(URI.create(VT_BASE + "/api/v3/" + path))
+                    .header("x-apikey", key).timeout(Duration.ofSeconds(10)).GET().build();
+            HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            switch (res.statusCode()) {
+                case 200 -> {
+                    Matcher m = Pattern.compile("\"last_analysis_stats\"\\s*:\\s*\\{([^}]*)\\}").matcher(res.body());
+                    String blk = m.find() ? m.group(1) : "";
+                    int total = 0; Matcher n = Pattern.compile(":\\s*(\\d+)").matcher(blk);
+                    while (n.find()) total += Integer.parseInt(n.group(1));
+                    return new Result(value, type, "ok", num(blk, "malicious"), num(blk, "suspicious"), total, link, null, false);
                 }
+                case 404 -> { return new Result(value, type, "notfound", 0, 0, 0, link, null, false); }
+                case 401, 403 -> { return new Result(value, type, "badkey", 0, 0, 0, "", "VirusTotal rejected that API key.", false); }
+                case 429 -> {
+                    if (res.body().contains("QuotaExceeded"))
+                        return new Result(value, type, "error", 0, 0, 0, "", "Your VirusTotal quota is used up. Try again later.", false);
+                    lim.penalize(WINDOW_MS);   // per-minute limit hit: pause this key for a full window, then retry
+                    return new Result(value, type, "retry", 0, 0, 0, "", "VirusTotal rate limit hit. Lower requests per minute.", false);
+                }
+                default -> { return new Result(value, type, "error", 0, 0, 0, "", "VirusTotal returned HTTP " + res.statusCode(), false); }
             }
-            return new Result(value, type, "error", 0, 0, 0, "", "VirusTotal rate limit hit. Lower requests per minute.", false);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return new Result(value, type, "error", 0, 0, 0, "", "Interrupted", false);
         } catch (IOException e) {
-            return new Result(value, type, "error", 0, 0, 0, "", "VirusTotal request failed: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), false);
+            return new Result(value, type, "retry", 0, 0, 0, "", "VirusTotal request failed: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), false);
         }
+    }
+
+    /** A "retry" that ran out of attempts becomes a plain error. */
+    static Result settle(Result r) {
+        return r.status.equals("retry") ? new Result(r.value, r.type, "error", 0, 0, 0, "", r.error, false) : r;
     }
 
     // ---------- HTTP layer ----------
@@ -260,7 +284,8 @@ public class Main {
             String ind = extract(body(x), "indicator");
             if (ind == null || ind.isBlank()) { send(x, 400, "{\"error\":\"Send {\\\"indicator\\\": \\\"...\\\"}\"}"); return; }
             Result r = lookup(ind, key(x), rpm(x));
-            send(x, 200, r.json(null));
+            for (int t = 1; t < 3 && r.status.equals("retry"); t++) r = lookup(ind, key(x), rpm(x));
+            send(x, 200, settle(r).json(null));
         });
 
         s.createContext("/api/batch", x -> {
@@ -268,32 +293,61 @@ public class Main {
             List<String> items = strings(body(x), "indicators");
             if (items.isEmpty()) { send(x, 400, "{\"error\":\"Send {\\\"indicators\\\": [...]}\"}"); return; }
             if (items.size() > MAX_BATCH) items = items.subList(0, MAX_BATCH);
-            String k = key(x); int r = rpm(x);
+            final String k = key(x); final int r = rpm(x);
 
             x.getResponseHeaders().set("Content-Type", "application/x-ndjson");
             x.getResponseHeaders().set("X-Accel-Buffering", "no");
             x.sendResponseHeaders(200, 0);                       // chunked stream
             OutputStream out = x.getResponseBody();
             Object lock = new Object();
-            CountDownLatch done = new CountDownLatch(items.size());
-            for (int i = 0; i < items.size(); i++) {
-                final int idx = i; final String ind = items.get(i);
+            AtomicBoolean gone = new AtomicBoolean(false);       // set when the browser disconnects
+            java.util.function.Consumer<String> write = line -> {
+                synchronized (lock) {
+                    if (gone.get()) return;
+                    try { out.write((line + "\n").getBytes(StandardCharsets.UTF_8)); out.flush(); }
+                    catch (IOException e) { gone.set(true); }
+                }
+            };
+
+            // A few workers pull from a queue. Retries go to the FRONT, so they are never stuck behind the rest.
+            record Task(int idx, String ind, int tries) {}
+            ConcurrentLinkedDeque<Task> queue = new ConcurrentLinkedDeque<>();
+            for (int i = 0; i < items.size(); i++) queue.add(new Task(i, items.get(i), 0));
+            AtomicInteger unfinished = new AtomicInteger(items.size());
+            int workers = Math.min(items.size(), Math.max(1, Math.min(r, 16)));
+            CountDownLatch done = new CountDownLatch(workers);
+            for (int w = 0; w < workers; w++) {
                 POOL.submit(() -> {
-                    String line;
-                    try { line = lookup(ind, k, r).json(idx); }
-                    catch (RuntimeException e) { line = new Result(ind, "", "error", 0, 0, 0, "", String.valueOf(e.getMessage()), false).json(idx); }
-                    synchronized (lock) { try { out.write((line + "\n").getBytes(StandardCharsets.UTF_8)); out.flush(); } catch (IOException ignored) {} }
-                    done.countDown();
+                    try {
+                        while (!gone.get() && unfinished.get() > 0) {
+                            Task t = queue.pollFirst();
+                            if (t == null) { Thread.sleep(200); continue; }   // another worker may still re-queue a retry
+                            Result res;
+                            try { res = lookup(t.ind(), k, r, gone::get); }
+                            catch (RuntimeException e) { res = new Result(t.ind(), "", "error", 0, 0, 0, "", String.valueOf(e.getMessage()), false); }
+                            if (res.status.equals("retry") && t.tries() < 2) { queue.addFirst(new Task(t.idx(), t.ind(), t.tries() + 1)); continue; }
+                            write.accept(settle(res).json(t.idx()));
+                            unfinished.decrementAndGet();
+                        }
+                    } catch (InterruptedException ignored) {
+                    } finally { done.countDown(); }
                 });
             }
+            // heartbeat: keeps proxies from closing a quiet connection and lets us notice a closed tab
+            var heartbeat = POOL.submit(() -> {
+                try { while (done.getCount() > 0 && !gone.get()) { Thread.sleep(HEARTBEAT_MS); write.accept("{\"ping\":true}"); } }
+                catch (InterruptedException ignored) {}
+            });
             try { done.await(); } catch (InterruptedException ignored) {}
-            out.close();
+            heartbeat.cancel(true);
+            if (gone.get()) System.out.println("Client disconnected: batch stopped, no more quota spent.");
+            try { out.close(); } catch (IOException ignored) {}
         });
 
         s.createContext("/api/quota", x -> {
             if (!gate(x)) return;
             try {
-                HttpRequest req = HttpRequest.newBuilder(URI.create("https://www.virustotal.com/api/v3/users/" + key(x)))
+                HttpRequest req = HttpRequest.newBuilder(URI.create(VT_BASE + "/api/v3/users/" + key(x)))
                         .header("x-apikey", key(x)).timeout(Duration.ofSeconds(8)).GET().build();
                 HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
                 if (res.statusCode() == 401 || res.statusCode() == 403) {
