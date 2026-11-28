@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header, Composer, Message } from '@/components/chat';
 import { fetchQuota, checkAll } from '@/lib/api';
-import { readSheet, downloadExcel, downloadTemplate } from '@/lib/excel';
+import { readSheet, downloadExcel } from '@/lib/excel';
 import { cacheGet, cacheSave, cacheSet, isKey, loadKey, planFrom, saveKey, splitIndicators, toRow } from '@/lib/ioc';
 
 let n = 0;
 const uid = () => 'm' + ++n + '-' + Date.now();
-const HELP = 'Paste IPs, domains, URLs or hashes (defanged is fine), or attach an .xlsx file with an “indicator” column.';
+const HELP = 'Paste IPs, domains, URLs or hashes (defanged is fine), or attach an .xlsx file with a column of indicators. Any layout works.';
 const ASK_KEY = 'Hi, I check IPs, domains, URLs and file hashes on VirusTotal. Paste your own VirusTotal API key below to start. It stays in this browser tab and is only forwarded to VirusTotal.';
 
 export default function App() {
   const [key, setKey] = useState(loadKey);
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [msgs, setMsgs] = useState(() => [{ id: uid(), role: 'assistant', ...(loadKey() ? { text: HELP, template: true } : { text: ASK_KEY }) }]);
+  const [msgs, setMsgs] = useState(() => [{ id: uid(), role: 'assistant', ...(loadKey() ? { text: HELP } : { text: ASK_KEY }) }]);
   const ctl = useRef(null), bottom = useRef(null);
 
   const add = (m) => setMsgs((x) => [...x, { id: uid(), ...m }]);
@@ -34,7 +34,7 @@ export default function App() {
     if (!p) return say('VirusTotal rejected that key. Check it and paste it again.');
     saveKey(k); setKey(k);
     const daily = p.dailyLeft != null ? `, ${p.dailyLeft} left today` : '';
-    say(`${p.label}: ${p.rpm} lookups per minute${daily}. ${HELP}`, { template: true });
+    say(`${p.label}: ${p.rpm} lookups per minute${daily}. ${HELP}`);
   }
 
   async function runJob(title, base, items) {
@@ -93,7 +93,8 @@ export default function App() {
     let parsed;
     try { parsed = await readSheet(await file.arrayBuffer()); }
     catch { return say('I could not read that file. Save it as .xlsx and try again.'); }
-    if (!parsed || !parsed.items.length) return say('I could not find an “indicator” column with data. The template shows the layout.', { template: true });
+    if (!parsed) return say('I could not find any indicators in that file. Put them in one column of the first sheet and try again.');
+    say(`Using column ${parsed.column} of “${parsed.sheet}”: ${parsed.items.length} rows.`);
     runJob(file.name, file.name.replace(/\.[^.]+$/, ''), parsed.items);
   }
 
@@ -102,7 +103,7 @@ export default function App() {
       <Header plan={plan} hasKey={!!key} busy={busy} onChangeKey={() => forget('Paste your new VirusTotal API key below.')} />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
-          {msgs.map((m) => <Message key={m.id} m={m} onStop={() => ctl.current?.abort()} onDownload={(j) => downloadExcel(j.items, j.base)} onTemplate={downloadTemplate} />)}
+          {msgs.map((m) => <Message key={m.id} m={m} onStop={() => ctl.current?.abort()} onDownload={(j) => downloadExcel(j.items, j.base)} />)}
           <div ref={bottom} />
         </div>
       </main>

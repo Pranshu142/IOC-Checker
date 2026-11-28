@@ -155,7 +155,7 @@ function JobCard({ job, onStop, onDownload }) {
   );
 }
 
-export function Message({ m, onStop, onDownload, onTemplate }) {
+export function Message({ m, onStop, onDownload }) {
   if (m.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -170,9 +170,9 @@ export function Message({ m, onStop, onDownload, onTemplate }) {
       <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full border text-[10px] font-semibold">VT</span>
       <div className="min-w-0 flex-1 space-y-3">
         {m.text && <p className="text-sm leading-relaxed">{m.text}</p>}
-        {m.template && <Button variant="outline" size="sm" onClick={onTemplate}><Download />Download Excel template</Button>}
         {m.job && <JobCard job={m.job} onStop={onStop} onDownload={onDownload} />}
       </div>
     </div>
   );
 }
+

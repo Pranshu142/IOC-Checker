@@ -6,9 +6,10 @@ backend/    Java 21, zero dependencies. Virtual-thread lookup engine.
 ```
 
 ## Using it
-Paste a VirusTotal key once per tab. Then paste indicators (defanged is fine) or attach an `.xlsx`
-with an `indicator` column. Only that column (and `severity`, if present) is read. Results fill in live; **Download Excel** gives a table with
-Indicator, Severity (colour-coded) and VT Score.
+Paste a VirusTotal key once per tab. Then paste indicators (defanged is fine) or attach an `.xlsx`.
+Any layout works: no header or special format is needed. The app finds the column that holds the
+indicators (a label above them is skipped) and ignores everything else. **Download Excel** gives a table with
+Indicator and Severity (colour-coded).
 
 Severity (VirusTotal malicious count): 0 Clean, 1-5 Medium, 6-10 High, above 10 Critical.
 

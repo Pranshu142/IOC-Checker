@@ -21,6 +21,19 @@ export function splitIndicators(text) {
   return [...new Set(t.split(/[\s,;]+/).filter(Boolean))];
 }
 
+// Rough check, only used to find the indicator column in a sheet. The server does the real validation.
+export function looksLikeIoc(raw) {
+  let s = String(raw ?? '').trim().replace(/\\\./g, '.')
+    .replace(/[\[({]\s*(?:\.|dot)\s*[\])}]/gi, '.').replace(/[\[({]\s*([:/\\]+)\s*[\])}]/g, '$1');
+  s = s.replace(/^[\s"'<({\[]+/, '').replace(/[\s"'>)}\].,;]+$/, '');
+  if (!s || /\s/.test(s)) return false;
+  return /^(h[xt*]{2}p\[?s?\]?|meow)[:/\\]+\S+/i.test(s)
+    || /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(s)
+    || (/^[0-9a-f:]{2,39}$/i.test(s) && (s.match(/:/g) || []).length >= 2)
+    || /^([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i.test(s)
+    || /^(?=.{1,253}$)([a-z0-9_-]{1,63}\.)+[a-z]{2,63}([:/?#]\S*)?$/i.test(s);
+}
+
 // ---- API key: this browser tab only ----
 export const isKey = (k) => /^[a-f0-9]{64}$/i.test(k);
 export const loadKey = () => { try { return sessionStorage.getItem('vt_key') || ''; } catch { return ''; } };

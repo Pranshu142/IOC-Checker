@@ -1,4 +1,4 @@
-import { scoreText } from './ioc';
+import { looksLikeIoc } from './ioc';
 
 // ExcelJS is large, so it is only loaded when a file is read or written.
 const xl = async () => (await import('exceljs')).default;
@@ -21,31 +21,50 @@ function save(buffer, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// Reads only the "indicator" column. Every other column, including any severity already in the sheet, is ignored.
+const colLetter = (n) => { let t = ''; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = Math.floor((n - 1) / 26); } return t; };
+
+// Picks the column that holds the indicators: the one with the most IOC-looking cells, in any sheet.
+// If nothing looks like an IOC but a sheet has a single column, that column is used.
+// sheets: [{ name, cols: Map(columnNumber -> [cell texts in row order]) }]
+export function pickColumn(sheets) {
+  let best = null;
+  for (const sh of sheets) {
+    for (const [c, texts] of sh.cols) {
+      const hits = texts.filter(looksLikeIoc).length;
+      if (hits && (!best || hits > best.hits)) best = { sheet: sh.name, c, texts, hits };
+    }
+  }
+  if (!best) {
+    const one = sheets.find((sh) => sh.cols.size === 1);
+    if (!one) return null;
+    const [c, texts] = [...one.cols][0];
+    best = { sheet: one.name, c, texts, hits: 0 };
+  }
+  // A first cell that is a label ("IOC", "Indicators"...) above a column of indicators is skipped.
+  const label = best.texts.length > 1 && !looksLikeIoc(best.texts[0]) && best.hits >= (best.texts.length - 1) / 2;
+  return { sheet: best.sheet, column: colLetter(best.c), items: (label ? best.texts.slice(1) : best.texts).map((ind) => ({ ind })) };
+}
+
+// Any layout works: no header or special format is needed. Only the indicator column is used.
 export async function readSheet(buffer) {
   const ExcelJS = await xl();
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer);
-  for (const ws of wb.worksheets) {
-    let ci = 0, hr = 0;
-    for (let r = 1; r <= Math.min(ws.rowCount, 15) && !ci; r++) {
-      ws.getRow(r).eachCell({ includeEmpty: false }, (cell, c) => {
-        if (!ci && String(cell.text ?? '').trim().toLowerCase() === 'indicator') { ci = c; hr = r; }
+  const sheets = wb.worksheets.map((ws) => {
+    const cols = new Map();
+    ws.eachRow({ includeEmpty: false }, (row) => {
+      row.eachCell({ includeEmpty: false }, (cell, c) => {
+        const t = String(cell.text ?? '').trim();
+        if (t) { if (!cols.has(c)) cols.set(c, []); cols.get(c).push(t); }
       });
-    }
-    if (!ci) continue;
-    const items = [];
-    for (let r = hr + 1; r <= ws.rowCount; r++) {
-      const row = ws.getRow(r);
-      const ind = String(row.getCell(ci).text ?? '').trim();
-      if (ind) items.push({ ind });
-    }
-    return { items, sheet: ws.name };
-  }
-  return null;
+    });
+    return { name: ws.name, cols };
+  });
+  const found = pickColumn(sheets);
+  return found && found.items.length ? found : null;
 }
 
-// items: [{ ind, row }]  ->  Indicator | Severity | VT Score, as a real Excel table
+// items: [{ ind, row }]  ->  Indicator | Severity, as a real Excel table
 export async function downloadExcel(items, name) {
   const ExcelJS = await xl();
   const done = items.filter((it) => it.row);
@@ -54,13 +73,13 @@ export async function downloadExcel(items, name) {
   ws.addTable({
     name: 'IOCResults', ref: 'A1', headerRow: true, totalsRow: false,
     style: { theme: 'TableStyleLight1', showRowStripes: false },
-    columns: [{ name: 'Indicator', filterButton: true }, { name: 'Severity', filterButton: true }, { name: 'VT Score', filterButton: true }],
-    rows: done.map((it) => [it.ind, it.row.sev, scoreText(it.row)]),
+    columns: [{ name: 'Indicator', filterButton: true }, { name: 'Severity', filterButton: true }],
+    rows: done.map((it) => [it.ind, it.row.sev]),
   });
-  [60, 18, 14].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  [64, 20].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
 
   ws.getRow(1).height = 22;
-  for (let c = 1; c <= 3; c++) {
+  for (let c = 1; c <= 2; c++) {
     const h = ws.getCell(1, c);
     h.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
     h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } };
@@ -68,7 +87,7 @@ export async function downloadExcel(items, name) {
   }
   done.forEach((it, i) => {
     const r = i + 2, s = sevStyle(it.row.sev);
-    for (let c = 1; c <= 3; c++) {
+    for (let c = 1; c <= 2; c++) {
       const cell = ws.getCell(r, c);
       cell.font = { name: 'Arial', size: 10 };
       cell.border = { top: thin, bottom: thin, left: thin, right: thin };
@@ -79,22 +98,4 @@ export async function downloadExcel(items, name) {
     sc.font = { name: 'Arial', size: 10, bold: true, color: { argb: s.fg } };
   });
   save(await wb.xlsx.writeBuffer(), name + '-results.xlsx');
-}
-
-export async function downloadTemplate() {
-  const ExcelJS = await xl();
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Indicators');
-  ws.addTable({
-    name: 'Indicators', ref: 'A1', headerRow: true, style: { theme: 'TableStyleLight1', showRowStripes: false },
-    columns: [{ name: 'indicator' }, { name: 'severity' }],
-    rows: [['8.8.8.8', ''], ['example[.]com', ''], ['hxxps://example[.]org/login', ''], ['44d88612fea8a8f36de82e1278abb02f', '']],
-  });
-  ws.getColumn(1).width = 60; ws.getColumn(2).width = 16;
-  for (let c = 1; c <= 2; c++) {
-    const h = ws.getCell(1, c);
-    h.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
-    h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } };
-  }
-  save(await wb.xlsx.writeBuffer(), 'vt-template.xlsx');
 }
