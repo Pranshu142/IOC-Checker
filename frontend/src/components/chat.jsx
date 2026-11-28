@@ -28,7 +28,7 @@ export function SevBadge({ sev }) {
 export function Header({ plan, hasKey, busy, onChangeKey }) {
   const [theme, toggleTheme] = useTheme();
   return (
-    <header className="border-b">
+    <header className="border-b bg-background/70 backdrop-blur">
       <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
         <div className="flex items-center gap-2 font-semibold">
           <span className="grid size-7 place-items-center rounded-md bg-primary text-xs text-primary-foreground">VT</span>
@@ -60,7 +60,7 @@ export function Composer({ keyMode, busy, onText, onFile, onKey }) {
     setText('');
   };
   return (
-    <div className="flex items-end gap-2 rounded-2xl border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring">
+    <div className="flex items-end gap-2 rounded-2xl border bg-background/85 p-2 shadow-sm backdrop-blur focus-within:ring-2 focus-within:ring-ring">
       {keyMode ? (
         <Input
           type="password" autoComplete="off" autoFocus value={text} onChange={(e) => setText(e.target.value)}
@@ -88,9 +88,9 @@ export function Composer({ keyMode, busy, onText, onFile, onKey }) {
 
 function ResultsTable({ items }) {
   return (
-    <div className="max-h-[28rem] overflow-auto rounded-lg border">
+    <div className="max-h-[28rem] overflow-auto rounded-lg border bg-background/80 backdrop-blur-sm">
       <Table>
-        <TableHeader className="sticky top-0 z-10 bg-background">
+        <TableHeader className="sticky top-0 z-10 bg-background/90 backdrop-blur">
           <TableRow>
             <TableHead>Indicator</TableHead>
             <TableHead className="w-36">Severity</TableHead>
@@ -158,7 +158,7 @@ function JobCard({ job, onStop, onDownload }) {
 export function Message({ m, onStop, onDownload }) {
   if (m.role === 'user') {
     return (
-      <div className="flex justify-end">
+      <div className="rise flex justify-end">
         <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-primary px-4 py-2 text-sm text-primary-foreground">
           {m.file ? <span className="inline-flex items-center gap-2"><FileSpreadsheet className="size-4" />{m.file}</span> : m.text}
         </div>
@@ -166,7 +166,7 @@ export function Message({ m, onStop, onDownload }) {
     );
   }
   return (
-    <div className="flex gap-3">
+    <div className="rise flex gap-3">
       <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full border text-[10px] font-semibold">VT</span>
       <div className="min-w-0 flex-1 space-y-3">
         {m.text && <p className="text-sm leading-relaxed">{m.text}</p>}

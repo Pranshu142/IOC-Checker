@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header, Composer, Message } from '@/components/chat';
+import Backdrop from '@/components/Backdrop';
 import { fetchQuota, checkAll, wakeServer } from '@/lib/api';
 import { readSheet, downloadExcel } from '@/lib/excel';
 import { cacheGet, cacheSave, cacheSet, isKey, loadKey, planFrom, saveKey, splitIndicators, toRow } from '@/lib/ioc';
@@ -17,6 +18,7 @@ export default function App() {
   const [key, setKey] = useState(loadKey);
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pulse, setPulse] = useState(0);
   const [msgs, setMsgs] = useState(() => [{ id: uid(), role: 'assistant', ...(loadKey() ? { text: HELP } : { text: ASK_KEY }) }]);
   const ctl = useRef(null), bottom = useRef(null);
 
@@ -73,6 +75,7 @@ export default function App() {
         finished.add(ind);
         const row = toRow(d);
         cacheSet(ind, row);
+        if (row.sev === 'Critical' || row.sev === 'High') setPulse((p) => p + 1);
         if (++saved % 10 === 0) cacheSave();           // a reload or crash then loses at most 10 results
         patch((j) => ({ ...j, done: j.done + 1, items: j.items.map((it) => (it.ind === ind ? { ...it, row } : it)) }));
         if (d.status === 'badkey') { badKey = true; ac.abort(); }
@@ -111,7 +114,8 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-dvh flex-col bg-background">
+    <div className="isolate flex h-dvh flex-col bg-background">
+      <Backdrop busy={busy} pulse={pulse} />
       <Header plan={plan} hasKey={!!key} busy={busy} onChangeKey={() => forget('Paste your new VirusTotal API key below.')} />
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-6xl space-y-6 px-4 py-6">
@@ -119,7 +123,7 @@ export default function App() {
           <div ref={bottom} />
         </div>
       </main>
-      <footer className="border-t">
+      <footer className="border-t bg-background/70 backdrop-blur">
         <div className="mx-auto w-full max-w-6xl px-4 py-3">
           <Composer keyMode={!key} busy={busy} onText={onText} onFile={onFile} onKey={onKey} />
           <p className="mt-2 text-center text-xs text-muted-foreground">Your key stays in this browser tab and is only forwarded to VirusTotal. It is never stored on the server.</p>
