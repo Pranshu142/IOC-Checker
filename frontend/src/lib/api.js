@@ -54,11 +54,11 @@ export async function streamBatch({ indicators, key, rpm, signal, onResult, idle
 }
 
 // Checks every indicator. If the connection drops or stalls, only the unanswered ones are sent again
-// (up to 4 tries without progress). Calls onResult(indicator, result) once per indicator.
+// (up to 6 tries without progress, waiting longer each time). Calls onResult(indicator, result) once per indicator.
 export async function checkAll({ indicators, key, rpm, signal, onResult, idleMs, retryDelayMs = 2000 }) {
   const finished = new Set();
   let attempts = 0, lastError = null;
-  while (!signal?.aborted && attempts < 4) {
+  while (!signal?.aborted && attempts < 6) {
     const pending = indicators.filter((i) => !finished.has(i));
     if (!pending.length) break;
     const chunk = pending.slice(0, 500), before = finished.size;
@@ -72,9 +72,26 @@ export async function checkAll({ indicators, key, rpm, signal, onResult, idleMs,
     } catch (e) {
       if (signal?.aborted || e.badKey) throw e;       // Stop pressed, or the key is bad: do not retry
       lastError = e;
-      await sleep(retryDelayMs);
+      await sleep(Math.min(15_000, retryDelayMs * 2 ** attempts));   // 2s, 4s, 8s, then 15s
     }
     attempts = finished.size > before ? 0 : attempts + 1;
   }
   return { finished, lastError: indicators.every((i) => finished.has(i)) ? null : lastError };
+}
+
+// Free hosting puts the server to sleep when idle, and waking it takes up to a minute or more.
+// Polls /api/health until it answers (or maxMs passes). onSlow fires once if it takes longer than 4 seconds.
+export async function wakeServer({ signal, onSlow, maxMs = 120_000 }) {
+  const start = Date.now();
+  const slow = setTimeout(() => onSlow?.(), 4000);
+  try {
+    while (!signal?.aborted && Date.now() - start < maxMs) {
+      try {
+        const res = await fetch(API + '/api/health', { signal: AbortSignal.timeout(15_000) });
+        if (res.ok) return true;
+      } catch { /* not up yet */ }
+      await sleep(2500);
+    }
+    return false;
+  } finally { clearTimeout(slow); }
 }

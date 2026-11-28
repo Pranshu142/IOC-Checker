@@ -21,6 +21,7 @@ function save(buffer, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+const HEADER = /^(indicators?|iocs?|ips?|ip addresses?|domains?|urls?|hashes|hash|values?|observables?|artifacts?)$/i;
 const colLetter = (n) => { let t = ''; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = Math.floor((n - 1) / 26); } return t; };
 
 // Picks the column that holds the indicators: the one with the most IOC-looking cells, in any sheet.
@@ -41,7 +42,8 @@ export function pickColumn(sheets) {
     best = { sheet: one.name, c, texts, hits: 0 };
   }
   // A first cell that is a label ("IOC", "Indicators"...) above a column of indicators is skipped.
-  const label = best.texts.length > 1 && !looksLikeIoc(best.texts[0]) && best.hits >= (best.texts.length - 1) / 2;
+  const first = best.texts[0];
+  const label = best.texts.length > 1 && !looksLikeIoc(first) && (HEADER.test(first) || best.hits >= (best.texts.length - 1) / 2);
   return { sheet: best.sheet, column: colLetter(best.c), items: (label ? best.texts.slice(1) : best.texts).map((ind) => ({ ind })) };
 }
 

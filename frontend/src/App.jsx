@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header, Composer, Message } from '@/components/chat';
-import { fetchQuota, checkAll } from '@/lib/api';
+import { fetchQuota, checkAll, wakeServer } from '@/lib/api';
 import { readSheet, downloadExcel } from '@/lib/excel';
 import { cacheGet, cacheSave, cacheSet, isKey, loadKey, planFrom, saveKey, splitIndicators, toRow } from '@/lib/ioc';
 
@@ -8,6 +8,10 @@ let n = 0;
 const uid = () => 'm' + ++n + '-' + Date.now();
 const HELP = 'Paste IPs, domains, URLs or hashes (defanged is fine), or attach an .xlsx file with a column of indicators. Any layout works.';
 const ASK_KEY = 'Hi, I check IPs, domains, URLs and file hashes on VirusTotal. Paste your own VirusTotal API key below to start. It stays in this browser tab and is only forwarded to VirusTotal.';
+
+// Turns network and gateway failures into something a person can act on.
+const friendly = (e) => (e.stalled || /Failed to fetch|NetworkError|Load failed|^Request failed \(5/.test(e.message)
+  ? 'The server did not respond. Free hosting sleeps when idle, so wait a minute and run it again.' : e.message);
 
 export default function App() {
   const [key, setKey] = useState(loadKey);
@@ -38,7 +42,8 @@ export default function App() {
   }
 
   async function runJob(title, base, items) {
-    const rpm = (plan || planFrom(null)).rpm, id = uid();
+    const id = uid();
+    let rpm = (plan || planFrom(null)).rpm;
     const prepared = items.map((it) => {
       const c = cacheGet(it.ind);
       return { ind: it.ind, row: c ? { ...c, cached: true } : null };
@@ -53,6 +58,13 @@ export default function App() {
     setBusy(true);
     if (plan?.dailyLeft != null && need.length > plan.dailyLeft)
       say(`Heads up: this needs ${need.length} lookups and your key has about ${plan.dailyLeft} left today. The rest will fail, and you can still download what finishes.`);
+
+    // Free hosting sleeps when idle: wake the server first, then re-read the key's real speed if that had failed.
+    const awake = await wakeServer({ signal: ac.signal, onSlow: () => say('Waking up the server. Free hosting sleeps when idle, so this can take up to a minute.') });
+    if (awake && (!plan || plan.label === 'Free limit assumed')) {
+      const p = await loadPlan(key);
+      if (p) { rpm = p.rpm; patch((j) => ({ ...j, rpm })); }
+    }
 
     let badKey = false, lastErr = null, saved = 0;
     const finished = new Set();
@@ -74,7 +86,7 @@ export default function App() {
     const leftover = (ind) => ({ value: ind, type: '', mal: '', total: '', link: '', cached: false,
       sev: stopped ? 'Not checked' : 'Error', note: stopped ? undefined : 'No answer from the server. Run it again.' });
     patch((j) => ({ ...j, running: false, stopped: stopped && !badKey,
-      error: lastErr ? lastErr.message : left.size && !stopped ? 'Some lookups got no answer from the server and are marked Error.' : null,
+      error: lastErr ? friendly(lastErr) : left.size && !stopped ? 'Some lookups got no answer from the server and are marked Error.' : null,
       items: j.items.map((it) => (!it.row && left.has(it.ind) ? { ...it, row: leftover(it.ind) } : it)) }));
     cacheSave(); setBusy(false); ctl.current = null;
     if (badKey) forget('VirusTotal rejected your key. Paste a valid one to continue.');
